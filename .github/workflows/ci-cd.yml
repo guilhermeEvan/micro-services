@@ -1,0 +1,91 @@
+name: ci-cd
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAMESPACE: ${{ github.repository_owner }}/pedidos-veloz
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api-gateway, orders, payments, stock]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        working-directory: services/${{ matrix.service }}
+        run: npm install --omit=dev --no-audit --no-fund
+
+      - name: Basic smoke test
+        working-directory: services/${{ matrix.service }}
+        run: node -e "console.log('smoke test ok')"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: services/${{ matrix.service }}
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/${{ matrix.service }}:latest
+
+  deploy-k8s:
+    if: github.event_name == 'push'
+    needs: test-and-build
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure kubectl
+        uses: azure/setup-kubectl@v4
+
+      - name: Load kubeconfig
+        shell: bash
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > $HOME/.kube/config
+
+      - name: Render image tags
+        shell: bash
+        run: |
+          sed -i "s|ghcr.io/loja-veloz/api-gateway:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/api-gateway:${{ github.sha }}|g" k8s/base/platform.yaml
+          sed -i "s|ghcr.io/loja-veloz/orders:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/orders:${{ github.sha }}|g" k8s/base/platform.yaml
+          sed -i "s|ghcr.io/loja-veloz/payments:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/payments:${{ github.sha }}|g" k8s/base/platform.yaml
+          sed -i "s|ghcr.io/loja-veloz/stock:latest|${{ env.REGISTRY }}/${{ env.IMAGE_NAMESPACE }}/stock:${{ github.sha }}|g" k8s/base/platform.yaml
+
+      - name: Apply manifests
+        run: kubectl apply -k k8s/base
+
+      - name: Wait rollout
+        run: |
+          kubectl rollout status deployment/api-gateway -n pedidos-veloz --timeout=120s
+          kubectl rollout status deployment/orders -n pedidos-veloz --timeout=120s
+          kubectl rollout status deployment/payments -n pedidos-veloz --timeout=120s
+          kubectl rollout status deployment/stock -n pedidos-veloz --timeout=120s

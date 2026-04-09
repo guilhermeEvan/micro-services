@@ -1,0 +1,5 @@
+kubeconfig_path = "~/.kube/config"
+namespace       = "pedidos-veloz"
+environment     = "prod"
+db_user         = "orders"
+db_password     = "trocar-esta-senha"

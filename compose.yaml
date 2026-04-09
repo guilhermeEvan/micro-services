@@ -1,0 +1,123 @@
+services:
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+    container_name: api-gateway
+    environment:
+      PORT: 8080
+      ORDERS_URL: http://orders:8081
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+    ports:
+      - "8080:8080"
+    depends_on:
+      - orders
+
+  orders:
+    build:
+      context: ./services/orders
+    container_name: orders
+    environment:
+      PORT: 8081
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      STOCK_URL: http://stock:8083
+      PAYMENTS_URL: http://payments:8082
+      RABBITMQ_URL: amqp://rabbitmq:5672
+      ORDER_EVENTS_QUEUE: pedido.criado
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+    depends_on:
+      - postgres
+      - stock
+      - payments
+      - rabbitmq
+
+  payments:
+    build:
+      context: ./services/payments
+    container_name: payments
+    environment:
+      PORT: 8082
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+
+  stock:
+    build:
+      context: ./services/stock
+    container_name: stock
+    environment:
+      PORT: 8083
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://otel-collector:4318/v1/traces
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.109.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel/config.yml"]
+    volumes:
+      - ./observability/otel-collector-config.conf:/etc/otel/config.yml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.60
+    container_name: jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "14250:14250"
+      - "4319:4317"
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api-gateway
+      - orders
+      - payments
+      - stock
+
+  grafana:
+    image: grafana/grafana:11.2.2
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+      - jaeger
+
+volumes:
+  postgres_data:
